@@ -245,3 +245,53 @@ def compute_health_alerts(log) -> List[str]:
     if log.water_intake and log.water_intake < 1.5:
         alerts.append(f"💧 Low water intake: {log.water_intake:.1f} L (recommended 2–3 L)")
     return alerts
+
+async def analyze_image_with_ai(base64_img: str, mime_type: str) -> str:
+    """Analyze an image report using OpenAI GPT-4o Vision."""
+    openai_key = os.getenv("OPENAI_API_KEY", "")
+    
+    prompt = """Analyze this medical report image and provide a clear summary in plain language.
+    Format your response exactly like this:
+    1. Report type detected
+    2. Key findings (list each value and whether it's normal/abnormal)
+    3. What the patient should know
+    4. Recommendations
+    
+    Always end with: '⚠️ This is not a medical diagnosis. Please consult a qualified doctor.'"""
+
+    if openai_key and openai_key.startswith("sk-"):
+        try:
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                resp = await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {openai_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": "gpt-4o-mini",
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": prompt},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:{mime_type};base64,{base64_img}",
+                                            "detail": "high"
+                                        }
+                                    }
+                                ]
+                            }
+                        ],
+                        "max_tokens": 1024,
+                    },
+                )
+                if resp.status_code == 200:
+                    return resp.json()["choices"][0]["message"]["content"]
+                return f"[OpenAI Error: {resp.text[:200]}]"
+        except Exception as e:
+            return f"[OpenAI Exception: {e}]"
+            
+    return "[API keys missing for vision analysis. Please configure OPENAI_API_KEY.]"

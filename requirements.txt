@@ -14,11 +14,8 @@ alembic==1.13.1
 # Firebase Admin
 firebase-admin==6.4.0
 
-# OCR (optional — uncomment to enable)
-# pytesseract==0.3.10
-# Pillow==10.2.0
-# pypdf2==3.0.1
-
+# PyPDF2 for extracting text from PDFs
+PyPDF2==3.0.1
 # Azure Document Intelligence (optional)
 # azure-ai-formrecognizer==3.3.2
 

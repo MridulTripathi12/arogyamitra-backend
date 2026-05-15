@@ -33,7 +33,8 @@ from schemas import (
     ReportAnalysisResponse, DashboardResponse,
 )
 from auth import hash_password, verify_password, create_access_token, get_user_id_from_token
-from ai_service import get_ai_response, get_suggestions, detect_emergency, compute_health_alerts
+from ai_service import get_ai_response, get_suggestions, detect_emergency, compute_health_alerts, analyze_image_with_ai
+import base64
 
 # ── App ───────────────────────────────────────────────────────────
 app = FastAPI(
@@ -488,31 +489,22 @@ async def analyze_report(
     file_size_kb = len(content) / 1024
     is_pdf = "pdf" in (file.content_type or "")
 
-    # Try OCR extraction (pytesseract if installed)
+    # AI Analysis
+    ai_summary = ""
     extracted_text = ""
-    try:
-        if not is_pdf:
-            import pytesseract
-            from PIL import Image as PILImage
-            img = PILImage.open(io.BytesIO(content))
-            extracted_text = pytesseract.image_to_string(img, lang="eng+hin")
-        else:
-            try:
-                import PyPDF2
-                reader = PyPDF2.PdfReader(io.BytesIO(content))
-                extracted_text = " ".join(
-                    page.extract_text() or "" for page in reader.pages
-                )
-            except Exception:
-                extracted_text = ""
-    except ImportError:
-        extracted_text = "[OCR libraries not installed — using AI summary]"
 
-    # Build AI prompt for report summarisation
-    if extracted_text and len(extracted_text) > 50:
-        prompt = f"""Analyse this medical report text and provide a clear summary in plain language:
+    if is_pdf:
+        # PDF Text Extraction
+        try:
+            import PyPDF2
+            reader = PyPDF2.PdfReader(io.BytesIO(content))
+            extracted_text = " ".join(page.extract_text() or "" for page in reader.pages)
+        except Exception as e:
+            extracted_text = ""
 
-{extracted_text[:3000]}
+        if extracted_text and len(extracted_text) > 50:
+            prompt = f"""Analyze this medical report text and provide a clear summary in plain language:
+{extracted_text[:4000]}
 
 Format your response as:
 1. Report type detected
@@ -520,20 +512,14 @@ Format your response as:
 3. What the patient should know
 4. Recommendations
 
-Always end with the medical disclaimer."""
-        ai_summary = await get_ai_response(prompt, language="en", profile=None, history=[])
+Always end with: '⚠️ This is not a medical diagnosis. Please consult a qualified doctor.'"""
+            ai_summary = await get_ai_response(prompt, language="en", profile=None, history=[])
+        else:
+            ai_summary = "[Could not extract readable text from this PDF. It may be a scanned image.]"
     else:
-        # Mock summary when no OCR
-        ai_summary = (
-            "📋 **Medical Report Summary**\n\n"
-            "Based on the uploaded file, here is a general overview:\n\n"
-            "✅ The file was received and processed successfully.\n\n"
-            "**To get accurate AI analysis:**\n"
-            "• Install pytesseract for OCR: `pip install pytesseract Pillow`\n"
-            "• Or connect Google Vision / Azure Document Intelligence API\n\n"
-            "**General reminder:** Always share your actual reports with your doctor for proper interpretation.\n\n"
-            "⚠️ This is not a medical diagnosis. Please consult a qualified physician."
-        )
+        # Image Vision Analysis
+        b64_img = base64.b64encode(content).decode('utf-8')
+        ai_summary = await analyze_image_with_ai(b64_img, file.content_type)
 
     # Save report record
     report = ReportModel(
