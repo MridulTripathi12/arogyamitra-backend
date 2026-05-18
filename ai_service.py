@@ -1,6 +1,6 @@
 # backend/ai_service.py
 """
-AI service layer — supports Claude (Anthropic), OpenAI, and mock fallback.
+AI service layer — supports Gemini API and mock fallback.
 Auto-detects available API key and uses the best available model.
 """
 import os
@@ -131,7 +131,7 @@ async def get_ai_response(
     history: Optional[List[ChatMessage]] = None,
 ) -> str:
     """
-    Try Claude → OpenAI → Mock fallback.
+    Try Gemini → Mock fallback.
     Returns the AI response text.
     """
     is_emergency = detect_emergency(message)
@@ -143,57 +143,34 @@ async def get_ai_response(
 
     # Add conversation history (last 6 messages = 3 turns)
     for h in (history or [])[-6:]:
-        messages.append({"role": h.role, "content": h.content})
-    messages.append({"role": "user", "content": message})
+        role = "model" if h.role == "assistant" else "user"
+        messages.append({"role": role, "parts": [{"text": h.content}]})
+    messages.append({"role": "user", "parts": [{"text": message}]})
 
-    # ── Try Claude ───────────────────────────────────────────────
-    claude_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if claude_key and claude_key.startswith("sk-ant"):
+    # ── Try Gemini ───────────────────────────────────────────────
+    gemini_key = os.getenv("GEMINI_API_KEY", "")
+    if gemini_key:
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers={
-                        "x-api-key": claude_key,
-                        "anthropic-version": "2023-06-01",
-                        "content-type": "application/json",
-                    },
+                    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}",
+                    headers={"Content-Type": "application/json"},
                     json={
-                        "model": "claude-3-5-haiku-20241022",
-                        "max_tokens": 1024,
-                        "system": system_prompt,
-                        "messages": messages,
+                        "systemInstruction": {"parts": [{"text": system_prompt}]},
+                        "contents": messages,
+                        "generationConfig": {"maxOutputTokens": 1024, "temperature": 0.7}
                     },
                 )
                 if resp.status_code == 200:
-                    return resp.json()["content"][0]["text"]
-                print(f"Claude error {resp.status_code}: {resp.text[:200]}")
+                    data = resp.json()
+                    if "candidates" in data and data["candidates"]:
+                        return data["candidates"][0]["content"]["parts"][0]["text"]
+                    else:
+                        print(f"Gemini returned empty: {data}")
+                else:
+                    print(f"Gemini error {resp.status_code}: {resp.text[:200]}")
         except Exception as e:
-            print(f"Claude exception: {e}")
-
-    # ── Try OpenAI ───────────────────────────────────────────────
-    openai_key = os.getenv("OPENAI_API_KEY", "")
-    if openai_key and openai_key.startswith("sk-"):
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {openai_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": "gpt-4o-mini",
-                        "messages": [{"role": "system", "content": system_prompt}] + messages,
-                        "max_tokens": 1024,
-                        "temperature": 0.7,
-                    },
-                )
-                if resp.status_code == 200:
-                    return resp.json()["choices"][0]["message"]["content"]
-                print(f"OpenAI error {resp.status_code}: {resp.text[:200]}")
-        except Exception as e:
-            print(f"OpenAI exception: {e}")
+            print(f"Gemini exception: {e}")
 
     # ── Mock fallback ────────────────────────────────────────────
     return MOCK_RESPONSE_HI if language == "hi" else MOCK_RESPONSE_EN
@@ -202,96 +179,104 @@ async def get_ai_response(
 def get_suggestions(message: str, language: str = "en") -> List[str]:
     """Generate contextual follow-up suggestions."""
     lower = message.lower()
+    hi = language == "hi"
     if any(w in lower for w in ["fever", "temperature", "बुखार"]):
-        return ["What temperature is dangerous?", "Home remedies for fever", "When to see a doctor?"]
+        return ["कौन सा तापमान खतरनाक है?" if hi else "What temperature is dangerous?", "बुखार के घरेलू उपाय" if hi else "Home remedies for fever", "डॉक्टर को कब दिखाएं?" if hi else "When to see a doctor?"]
     if any(w in lower for w in ["headache", "head pain", "सिरदर्द", "माइग्रेन"]):
-        return ["Migraine vs tension headache", "Headache remedies", "When to see a neurologist?"]
+        return ["माइग्रेन बनाम तनाव सिरदर्द" if hi else "Migraine vs tension headache", "सिरदर्द के उपाय" if hi else "Headache remedies", "न्यूरोलॉजिस्ट को कब दिखाएं?" if hi else "When to see a neurologist?"]
     if any(w in lower for w in ["sugar", "diabetes", "blood glucose", "शुगर", "मधुमेह"]):
-        return ["Normal blood sugar ranges", "Diabetic diet tips", "HbA1c explained"]
+        return ["सामान्य ब्लड शुगर रेंज" if hi else "Normal blood sugar ranges", "डायबिटिक डाइट टिप्स" if hi else "Diabetic diet tips", "HbA1c क्या है?" if hi else "HbA1c explained"]
     if any(w in lower for w in ["pressure", "bp", "hypertension", "रक्तचाप"]):
-        return ["Normal BP range", "Reduce blood pressure naturally", "BP medications overview"]
+        return ["सामान्य बीपी रेंज" if hi else "Normal BP range", "रक्तचाप कम करने के प्राकृतिक तरीके" if hi else "Reduce blood pressure naturally", "बीपी की दवाओं की जानकारी" if hi else "BP medications overview"]
     if any(w in lower for w in ["sleep", "insomnia", "नींद"]):
-        return ["Sleep hygiene tips", "How much sleep do I need?", "Melatonin — is it safe?"]
+        return ["नींद के टिप्स" if hi else "Sleep hygiene tips", "मुझे कितनी नींद की जरूरत है?" if hi else "How much sleep do I need?", "मेलाटोनिन - क्या यह सुरक्षित है?" if hi else "Melatonin — is it safe?"]
     if any(w in lower for w in ["weight", "obesity", "वजन"]):
-        return ["Healthy BMI range", "Safe weight loss tips", "Indian diet for weight loss"]
+        return ["स्वस्थ बीएमआई रेंज" if hi else "Healthy BMI range", "सुरक्षित वजन घटाने के टिप्स" if hi else "Safe weight loss tips", "वजन घटाने के लिए भारतीय आहार" if hi else "Indian diet for weight loss"]
     return [
-        "Tell me about my medications",
-        "What are normal vital ranges?",
-        "How to improve my immunity?",
+        "मेरी दवाओं के बारे में बताएं" if hi else "Tell me about my medications",
+        "सामान्य वाइटल रेंज क्या हैं?" if hi else "What are normal vital ranges?",
+        "अपनी इम्युनिटी कैसे बढ़ाएं?" if hi else "How to improve my immunity?",
     ]
 
 
-def compute_health_alerts(log) -> List[str]:
+def compute_health_alerts(log, language: str = "en") -> List[str]:
     """Compute abnormal value alerts from a health log."""
     alerts = []
+    hi = language == "hi"
     if log.systolic_bp and log.systolic_bp > 140:
-        alerts.append(f"⚠️ High systolic BP: {log.systolic_bp:.0f} mmHg (normal < 120)")
+        alerts.append(f"⚠️ {'उच्च सिस्टोलिक बीपी' if hi else 'High systolic BP'}: {log.systolic_bp:.0f} mmHg ({'सामान्य' if hi else 'normal'} < 120)")
     if log.diastolic_bp and log.diastolic_bp > 90:
-        alerts.append(f"⚠️ High diastolic BP: {log.diastolic_bp:.0f} mmHg (normal < 80)")
+        alerts.append(f"⚠️ {'उच्च डायस्टोलिक बीपी' if hi else 'High diastolic BP'}: {log.diastolic_bp:.0f} mmHg ({'सामान्य' if hi else 'normal'} < 80)")
     if log.systolic_bp and log.systolic_bp < 90:
-        alerts.append(f"⚠️ Low blood pressure: {log.systolic_bp:.0f} mmHg")
+        alerts.append(f"⚠️ {'निम्न रक्तचाप' if hi else 'Low blood pressure'}: {log.systolic_bp:.0f} mmHg")
     if log.blood_sugar and log.blood_sugar > 200:
-        alerts.append(f"🚨 Very high blood sugar: {log.blood_sugar:.0f} mg/dL")
+        alerts.append(f"🚨 {'बहुत अधिक रक्त शर्करा' if hi else 'Very high blood sugar'}: {log.blood_sugar:.0f} mg/dL")
     if log.blood_sugar and log.blood_sugar < 70:
-        alerts.append(f"🚨 Low blood sugar: {log.blood_sugar:.0f} mg/dL — risk of hypoglycemia")
+        alerts.append(f"🚨 {'निम्न रक्त शर्करा (हाइपोग्लाइसीमिया का खतरा)' if hi else 'Low blood sugar — risk of hypoglycemia'}: {log.blood_sugar:.0f} mg/dL")
     if log.heart_rate and log.heart_rate > 100:
-        alerts.append(f"⚠️ Elevated heart rate: {log.heart_rate:.0f} bpm (tachycardia)")
+        alerts.append(f"⚠️ {'उच्च हृदय गति' if hi else 'Elevated heart rate'}: {log.heart_rate:.0f} bpm (tachycardia)")
     if log.heart_rate and log.heart_rate < 50:
-        alerts.append(f"⚠️ Low heart rate: {log.heart_rate:.0f} bpm (bradycardia)")
+        alerts.append(f"⚠️ {'निम्न हृदय गति' if hi else 'Low heart rate'}: {log.heart_rate:.0f} bpm (bradycardia)")
     if log.oxygen_saturation and log.oxygen_saturation < 95:
-        alerts.append(f"🚨 Low SpO₂: {log.oxygen_saturation:.0f}% — consult doctor immediately")
+        alerts.append(f"🚨 {'कम ऑक्सीजन' if hi else 'Low SpO₂'}: {log.oxygen_saturation:.0f}% — {'तुरंत डॉक्टर से मिलें' if hi else 'consult doctor immediately'}")
     if log.sleep_hours and log.sleep_hours < 5:
-        alerts.append(f"⚠️ Insufficient sleep: {log.sleep_hours:.1f} hrs (recommended 7–9)")
+        alerts.append(f"⚠️ {'अपर्याप्त नींद' if hi else 'Insufficient sleep'}: {log.sleep_hours:.1f} hrs ({'अनुशंसित 7-9' if hi else 'recommended 7–9'})")
     if log.water_intake and log.water_intake < 1.5:
-        alerts.append(f"💧 Low water intake: {log.water_intake:.1f} L (recommended 2–3 L)")
+        alerts.append(f"💧 {'कम पानी' if hi else 'Low water intake'}: {log.water_intake:.1f} L ({'अनुशंसित 2-3 L' if hi else 'recommended 2–3 L'})")
     return alerts
 
-async def analyze_image_with_ai(base64_img: str, mime_type: str) -> str:
-    """Analyze an image report using OpenAI GPT-4o Vision."""
-    openai_key = os.getenv("OPENAI_API_KEY", "")
+async def analyze_image_with_ai(base64_img: str, mime_type: str, language: str = "en") -> str:
+    """Analyze an image report using Gemini 1.5 Flash Vision."""
+    gemini_key = os.getenv("GEMINI_API_KEY", "")
     
     prompt = """Analyze this medical report image and provide a clear summary in plain language.
+    You must act as a RAG-based diagnostic verification system. Verify the findings against the following knowledge bases and datasets:
+    - Imaging Datasets: MIMIC-CXR, ChestX-ray8, HAM10000, SIIM-ISIC Melanoma Classification
+    - Clinical & Textual Datasets: Medical Transcriptions (MTSamples), Disease-Symptom Knowledge Graph, MIMIC-IV
+    - Knowledge Base & RAG Sources: PubMed Central (PMC), The Merck Manual, Cochrane Reviews, CORD-19
+
     Format your response exactly like this:
     1. Report type detected
     2. Key findings (list each value and whether it's normal/abnormal)
     3. What the patient should know
     4. Recommendations
+    5. Diagnostic Verification & Citations (Cite relevant sources from the RAG datasets mentioned above to verify these findings)
     
     Always end with: '⚠️ This is not a medical diagnosis. Please consult a qualified doctor.'"""
+    
+    if language == "hi":
+        prompt += "\n\nCRITICAL: Please provide the ENTIRE response in Hindi."
 
-    if openai_key and openai_key.startswith("sk-"):
+    if gemini_key:
         try:
             async with httpx.AsyncClient(timeout=45.0) as client:
                 resp = await client.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {openai_key}",
-                        "Content-Type": "application/json",
-                    },
+                    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}",
+                    headers={"Content-Type": "application/json"},
                     json={
-                        "model": "gpt-4o-mini",
-                        "messages": [
+                        "contents": [
                             {
-                                "role": "user",
-                                "content": [
-                                    {"type": "text", "text": prompt},
+                                "parts": [
+                                    {"text": prompt},
                                     {
-                                        "type": "image_url",
-                                        "image_url": {
-                                            "url": f"data:{mime_type};base64,{base64_img}",
-                                            "detail": "high"
+                                        "inlineData": {
+                                            "mimeType": mime_type,
+                                            "data": base64_img
                                         }
                                     }
                                 ]
                             }
                         ],
-                        "max_tokens": 1024,
+                        "generationConfig": {"maxOutputTokens": 1024}
                     },
                 )
                 if resp.status_code == 200:
-                    return resp.json()["choices"][0]["message"]["content"]
-                return f"[OpenAI Error: {resp.text[:200]}]"
+                    data = resp.json()
+                    if "candidates" in data and data["candidates"]:
+                        return data["candidates"][0]["content"]["parts"][0]["text"]
+                    return f"[Gemini returned empty: {data}]"
+                return f"[Gemini Error: {resp.text[:200]}]"
         except Exception as e:
-            return f"[OpenAI Exception: {e}]"
+            return f"[Gemini Exception: {e}]"
             
-    return "[API keys missing for vision analysis. Please configure OPENAI_API_KEY.]"
+    return "[API keys missing for vision analysis. Please configure GEMINI_API_KEY.]"
